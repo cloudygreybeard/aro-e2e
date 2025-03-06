@@ -61,7 +61,7 @@ Before you begin, ensure you have the following:
 
    ```bash
    CLUSTERPREFIX=aro-example
-   REGION=centralindia
+   LOCATION=centralindia
    CLUSTERPATTERN=udr
    # - `basic`: Simplest cluster, nothing fancy
    # - `private`: Simple cluster with apiserver and ingress visibility set to private.
