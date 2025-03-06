@@ -109,6 +109,42 @@ all:
           allow-not-recommended: true
           admin_acks:
             - { "data": { "ack-4.15-kube-1.29-api-removals-in-4.16": "true" } }
+      fast_417: &upgrade_fast_417
+        #
+        # https://access.redhat.com/labs/ocpupgradegraph/update_path?channel=fast-4.17&arch=x86_64&is_show_hot_fix=false&current_ocp_version=4.15.0&target_ocp_version=4.17.3
+        # channel: fast-4.18
+        # path: 4.16.0 - 4.16.33 - 4.17.15 - 4.18.3
+        - from: "4.15"
+          channel: fast-4.16
+          version: 4.16.33
+          admin_acks:
+            - { "data": { "ack-4.15-kube-1.29-api-removals-in-4.16": "true" } }
+        - from: "4.16"
+          channel: fast-4.18
+          version: 4.17.15
+          #admin_acks:
+          # No admin-acks identified at https://docs.openshift.com/container-platform/4.17/updating/preparing_for_updates/updating-cluster-prepare.html
+        - from: "4.17"
+      fast_418: &upgrade_fast_418
+        #
+        # https://access.redhat.com/labs/ocpupgradegraph/update_path?channel=fast-4.18&arch=x86_64&is_show_hot_fix=false&current_ocp_version=4.16.0&target_ocp_version=4.18.3
+        # channel: fast-4.18
+        # path: 4.16.0 - 4.16.33 - 4.17.15 - 4.18.3
+        - from: "4.15"
+          channel: fast-4.16
+          version: 4.16.33
+          admin_acks:
+            - { "data": { "ack-4.15-kube-1.29-api-removals-in-4.16": "true" } }
+        - from: "4.16"
+          channel: fast-4.18
+          version: 4.17.15
+          #admin_acks:
+          # No admin-acks identified at https://docs.openshift.com/container-platform/4.17/updating/preparing_for_updates/updating-cluster-prepare.html
+        - from: "4.17"
+          channel: fast-4.18
+          version: 4.18.3
+          #admin_acks:
+          # No admin-acks identified at https://docs.openshift.com/container-platform/4.18/updating/preparing_for_updates/updating-cluster-prepare.html
       upgrade_41345_41346: &upgrade_41345_41346
         - from: "4.12"
           channel: stable-4.13
@@ -189,6 +225,18 @@ standard_clusters:
       name: aro
       version: 4.12.25
       upgrade: *upgrade_fast_415
+    fast-416:
+      name: aro
+      version: 4.12.25
+      upgrade: *upgrade_fast_416
+    fast-417:
+      name: aro
+      version: 4.12.25
+      upgrade: *upgrade_fast_417
+    fast-418:
+      name: aro
+      version: 4.12.25
+      upgrade: *upgrade_fast_418
     enc:
       # Basic cluster with encryption-at-host enabled
       name: aro-414
@@ -394,6 +442,15 @@ udr_clusters:
           address_prefix: 0.0.0.0/0
           next_hop_type: none
       upgrade: *upgrade_to_416
+    udr-415to418:
+      name: aro
+      version: 4.15.27
+      HAS_INTERNET: false
+      routes:
+        - name: Blackhole
+          address_prefix: 0.0.0.0/0
+          next_hop_type: none
+      upgrade: *upgrade_fast_418
   vars:
     resource_group: "{{ CLUSTERPREFIX }}-{{ inventory_hostname }}-{{ location }}"
     network_prefix_cidr: 10.0.0.0/22
