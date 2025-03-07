@@ -736,7 +736,29 @@
     src: >
       {{ aro_cluster_state.clusters.properties.consoleProfile.url
          | replace('console-openshift-console', 'downloads-openshift-console')
-      }}amd64/linux/oc.tar
+      }}arm64/linux/oc.tar
+
+    #}}amd64/linux/oc.tar
+    # to fix for podman on macOS Silicon, otherwise:
+    # TASK [azureredhatopenshift.cluster.standard_cluster : create_aro_cluster | Get oc version] ************************************************************************************************************************************
+    # FAILED - RETRYING: [basic -> localhost]: create_aro_cluster | Get oc version (1 retries left).
+    # fatal: [basic -> localhost]: FAILED! => {"attempts": 3, "changed": false, "cmd": ["oc", "version", "--kubeconfig=basic.kubeconfig"], "delta": "0:00:00.099731", "end": "2025-03-07 03:12:56.721349", "msg": "non-zero return code", "rc": -5, "start": "2025-03-07 03:12:56.621618", "stderr": "rosetta error: failed to open elf at /lib64/ld-linux-x86-64.so.2\n ", "stderr_lines": ["rosetta error: failed to open elf at /lib64/ld-linux-x86-64.so.2", " "], "stdout": "", "stdout_lines": []}
+    #
+    # ideas to achieve:
+    # ---
+    # vars:
+    #   oc_cli_arch: {
+    #     "aarch64": "arm64",
+    #     "x86_64": "amd64"
+    #   }
+    # tasks:
+    # - name: Debug message
+    #   ansible.builtin.debug:
+    #     msg: "{{ [ansible_architecture] | map('extract', oc_cli_arch) | first }}"
+    #
+    # # example
+    #}}{{ [ansible_architecture] | map('extract', oc_cli_arch) | first }}/linux/oc.tar
+
     remote_src: true
     dest: /usr/local/bin/
     include: ["oc"]
