@@ -2,14 +2,14 @@
 all:
   vars:
     upgrade_paths:
-      fast_416: &upgrade_fast_416
+      stable_416: &upgrade_stable_416
         # https://access.redhat.com/labs/ocpupgradegraph/update_path?channel=stable-4.16&arch=x86_64&is_show_hot_fix=false&current_ocp_version=4.15.0&target_ocp_version=4.16.33
         - from: "4.15"
           channel: stable-4.16
           version: 4.16.33
           admin_acks:
             - { "data": { "ack-4.15-kube-1.29-api-removals-in-4.16": "true" } }
-      fast_417: &upgrade_fast_417
+      stable_417: &upgrade_stable_417
         # https://access.redhat.com/labs/ocpupgradegraph/update_path?channel=fast-4.16&arch=x86_64&is_show_hot_fix=false&current_ocp_version=4.15.0&target_ocp_version=4.17.15
         - from: "4.15"
           channel: stable-4.16
@@ -46,9 +46,9 @@ standard_clusters:
   # See byok_cluster for an example that is not "standard"
   hosts:
     basic-416:
-      upgrade: *upgrade_fast_416
+      upgrade: *upgrade_stable_416
     basic-417:
-      upgrade: *upgrade_fast_417
+      upgrade: *upgrade_stable_417
     basic-418:
       upgrade: *upgrade_fast_418
   vars:
@@ -69,9 +69,9 @@ udr_clusters:
   # https://learn.microsoft.com/en-us/azure/openshift/howto-create-private-cluster-4x
   hosts:
     udr-416:
-      upgrade: *upgrade_fast_416
+      upgrade: *upgrade_stable_416
     udr-417:
-      upgrade: *upgrade_fast_417
+      upgrade: *upgrade_stable_417
     udr-418:
       upgrade: *upgrade_fast_418
   vars:
