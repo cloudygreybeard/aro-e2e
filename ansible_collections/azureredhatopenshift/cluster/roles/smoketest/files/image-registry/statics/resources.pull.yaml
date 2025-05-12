@@ -1,0 +1,145 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: smoke-test-image-registry
+spec: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    openshift.io/description: Service account for smoke-test jobs
+  name: smoke-test-image-registry-job
+  namespace: smoke-test-image-registry
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    openshift.io/description: For ConfigMap creation and `oc debug` capability in
+      smoke test jobs
+  name: smoke-test-job-cm-editor
+  namespace: smoke-test-image-registry
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - create
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - pods/log
+  verbs:
+  - get
+  - list
+  - create
+  - delete
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    openshift.io/description: Allows smoke test job to edit ConfigMaps in this namespace.
+  name: smoke-test-job-cm-editors
+  namespace: smoke-test-image-registry
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: smoke-test-job-cm-editor
+subjects:
+- kind: ServiceAccount
+  name: smoke-test-image-registry-job
+  namespace: smoke-test-image-registry
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    openshift.io/description: Allows smoke test job to push images to this namespace.
+  name: smoke-test-job-image-builders
+  namespace: smoke-test-image-registry
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:image-builder
+subjects:
+- kind: ServiceAccount
+  name: smoke-test-image-registry-job
+  namespace: smoke-test-image-registry
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    openshift.io/description: Waits for the `smoke-test-image-digest` ConfigMap to
+      be created (by the push-image job) and verifies the image by deploying a debug
+      pod using it. Outputs `/hello-openshift` on success.
+  name: verify-image
+  namespace: smoke-test-image-registry
+spec:
+  activeDeadlineSeconds: 1800
+  backoffLimit: 1
+  template:
+    spec:
+      containers:
+      - command:
+        - bash
+        - -c
+        - |
+          [[ -n "${DEBUG:-}" ]] && set -x
+          set -eu
+          DIGEST=$(cat /shared/digest.txt)
+          NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+          IMAGE="image-registry.openshift-image-registry.svc:5000/${NAMESPACE}/test-image@${DIGEST}"
+          echo "$(date --iso=ns): Verifying image: ${IMAGE}"
+          oc debug --quiet --image="${IMAGE}" -- /hello
+          echo "$(date --iso=ns): Image verified successfully: ${IMAGE}"
+        image: image-registry.openshift-image-registry.svc:5000/openshift/cli
+        name: verify
+        volumeMounts:
+        - mountPath: /shared
+          name: shared-data
+      initContainers:
+      - command:
+        - bash
+        - -c
+        - |
+          [[ -n "${DEBUG:-}" ]] && set -x
+          set -eu
+          CONFIGMAP_NAME=smoke-test-image-digest
+          NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+          TIMEOUT=1800  # seconds (30 minutes max to wait for ConfigMap)
+          INTERVAL=10   # seconds between each check
+          ELAPSED=0
+          echo "Waiting for ConfigMap ${CONFIGMAP_NAME} with non-empty digest..."
+          while true; do
+            DIGEST=$(oc get configmap ${CONFIGMAP_NAME} -n ${NAMESPACE} -o jsonpath='{.data.digest}' 2>/dev/null || true)
+            if [[ -n "${DIGEST}" ]]; then
+              echo "${DIGEST}" > /shared/digest.txt
+              echo "Found digest: ${DIGEST}"
+              break
+            fi
+            if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
+              echo "Timed out waiting for digest in ConfigMap ${CONFIGMAP_NAME}"
+              exit 1
+            fi
+            sleep ${INTERVAL}
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+        image: image-registry.openshift-image-registry.svc:5000/openshift/cli
+        name: wait-for-digest
+        volumeMounts:
+        - mountPath: /shared
+          name: shared-data
+      restartPolicy: Never
+      serviceAccountName: smoke-test-image-registry-job
+      volumes:
+      - emptyDir: {}
+        name: shared-data
+  ttlSecondsAfterFinished: 600

@@ -1,0 +1,65 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    openshift.io/description: Waits for the `smoke-test-image-digest` ConfigMap to be created (by the push-image job) and verifies the image by deploying a debug pod using it. Outputs `/hello-openshift` on success.
+  name: verify-image-job
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 1800 # Allow 30 minutes for the job to complete
+  ttlSecondsAfterFinished: 600 # Cleanup finished pods after 10 minutes
+  template:
+    spec:
+      serviceAccountName: smoke-test-image-registry-job
+      restartPolicy: Never
+      volumes:
+        - name: shared-data
+          emptyDir: {}
+      initContainers:
+        - name: wait-for-digest
+          image: quay.io/openshift/origin-cli:latest
+          command:
+            - bash
+            - -c
+            - |
+              set -eux
+              CONFIGMAP_NAME=smoke-test-image-digest
+              NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+              TIMEOUT=1800  # seconds (30 minutes max to wait for ConfigMap)
+              INTERVAL=10   # seconds between each check
+              ELAPSED=0
+              echo "Waiting for ConfigMap ${CONFIGMAP_NAME} with non-empty digest..."
+              while true; do
+                DIGEST=$(oc get configmap ${CONFIGMAP_NAME} -n ${NAMESPACE} -o jsonpath='{.data.digest}' 2>/dev/null || true)
+                if [[ -n "${DIGEST}" ]]; then
+                  echo "${DIGEST}" > /shared/digest.txt
+                  echo "Found digest: ${DIGEST}"
+                  break
+                fi
+                if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
+                  echo "Timed out waiting for digest in ConfigMap ${CONFIGMAP_NAME}"
+                  exit 1
+                fi
+                sleep ${INTERVAL}
+                ELAPSED=$((ELAPSED + INTERVAL))
+              done
+          volumeMounts:
+            - name: shared-data
+              mountPath: /shared
+      containers:
+        - name: verify
+          image: quay.io/openshift/origin-cli:latest
+          command:
+            - bash
+            - -c
+            - |
+              set -eux
+              DIGEST=$(cat /shared/digest.txt)
+              IMAGE="image-registry.openshift-image-registry.svc:5000/smoke-test-image-registry/origin-hello-openshift@${DIGEST}"
+              echo "Verifying image: ${IMAGE}"
+              oc debug --quiet --image="${IMAGE}" -- bash -c 'ls /hello*'
+              echo "Image verified successfully: ${IMAGE}"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /shared

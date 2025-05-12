@@ -1,0 +1,50 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: push-image-job
+  annotations:
+    openshift.io/description: Pushes an image to openshift-image-registry and creates the ConfigMap with the digest.
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600 # Cleanup finished pods after 10 minutes
+  template:
+    spec:
+      serviceAccountName: smoke-test-image-registry-job
+      restartPolicy: Never
+      volumes:
+        - name: shared-data
+          emptyDir: {}
+      initContainers:
+        - name: skopeo-push
+          image: quay.io/skopeo/stable:latest
+          command:
+            - bash
+            - -c
+            - |2
+              set -eu
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              skopeo copy --remove-signatures \
+                --dest-cert-dir /var/run/secrets/kubernetes.io/serviceaccount \
+                --dest-creds "serviceaccount:${TOKEN}" \
+                docker://quay.io/openshift/origin-hello-openshift:latest \
+                docker://image-registry.openshift-image-registry.svc:5000/smoke-test-image-registry/origin-hello-openshift:latest \
+                --digestfile /shared/digest.txt
+          volumeMounts:
+            - name: shared-data
+              mountPath: /shared
+      containers:
+        - name: create-configmap
+          image: quay.io/openshift/origin-cli:latest
+          command:
+            - bash
+            - -c
+            - |2
+              set -eux
+              DIGEST=$(cat /shared/digest.txt)
+              oc create configmap smoke-test-image-digest \
+                --from-literal=digest=${DIGEST} \
+                -n smoke-test-image-registry
+          volumeMounts:
+            - name: shared-data
+              mountPath: /shared

@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    openshift.io/description: Waits for the `smoke-test-image-digest` ConfigMap to
+      be created (by the push-image job) and verifies the image by deploying a debug
+      pod using it. Outputs `/hello-openshift` on success.
+  name: verify-image
+  namespace: smoke-test-image-registry
+spec:
+  activeDeadlineSeconds: 1800
+  backoffLimit: 1
+  template:
+    spec:
+      containers:
+      - command:
+        - bash
+        - -c
+        - |
+          [[ -n "${DEBUG:-}" ]] && set -x
+          set -eu
+          DIGEST=$(cat /shared/digest.txt)
+          NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+          IMAGE="image-registry.openshift-image-registry.svc:5000/${NAMESPACE}/test-image@${DIGEST}"
+          echo "$(date --iso=ns): Verifying image: ${IMAGE}"
+          oc debug --quiet --image="${IMAGE}" -- /hello
+          echo "$(date --iso=ns): Image verified successfully: ${IMAGE}"
+        image: image-registry.openshift-image-registry.svc:5000/openshift/cli
+        name: verify
+        volumeMounts:
+        - mountPath: /shared
+          name: shared-data
+      initContainers:
+      - command:
+        - bash
+        - -c
+        - |
+          [[ -n "${DEBUG:-}" ]] && set -x
+          set -eu
+          CONFIGMAP_NAME=smoke-test-image-digest
+          NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+          TIMEOUT=1800  # seconds (30 minutes max to wait for ConfigMap)
+          INTERVAL=10   # seconds between each check
+          ELAPSED=0
+          echo "Waiting for ConfigMap ${CONFIGMAP_NAME} with non-empty digest..."
+          while true; do
+            DIGEST=$(oc get configmap ${CONFIGMAP_NAME} -n ${NAMESPACE} -o jsonpath='{.data.digest}' 2>/dev/null || true)
+            if [[ -n "${DIGEST}" ]]; then
+              echo "${DIGEST}" > /shared/digest.txt
+              echo "Found digest: ${DIGEST}"
+              break
+            fi
+            if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
+              echo "Timed out waiting for digest in ConfigMap ${CONFIGMAP_NAME}"
+              exit 1
+            fi
+            sleep ${INTERVAL}
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+        image: image-registry.openshift-image-registry.svc:5000/openshift/cli
+        name: wait-for-digest
+        volumeMounts:
+        - mountPath: /shared
+          name: shared-data
+      restartPolicy: Never
+      serviceAccountName: smoke-test-image-registry-job
+      volumes:
+      - emptyDir: {}
+        name: shared-data
+  ttlSecondsAfterFinished: 600

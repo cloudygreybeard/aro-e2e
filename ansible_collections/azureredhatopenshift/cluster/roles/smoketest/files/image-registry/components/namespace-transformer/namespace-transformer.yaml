@@ -1,0 +1,7 @@
+---
+apiVersion: builtin
+kind: NamespaceTransformer
+metadata:
+  name: _
+  namespace: smoke-test-image-registry
+setRoleBindingSubjects: allServiceAccounts

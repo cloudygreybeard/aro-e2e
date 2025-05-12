@@ -1,0 +1,15 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    openshift.io/description: Allows smoke test job to edit ConfigMaps in this namespace.
+  name: smoke-test-job-cm-editors
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: smoke-test-job-cm-editor
+subjects:
+  - kind: ServiceAccount
+    name: smoke-test-image-registry-job
+    namespace: _

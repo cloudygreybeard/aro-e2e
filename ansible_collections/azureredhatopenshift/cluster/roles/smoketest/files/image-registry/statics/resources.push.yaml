@@ -1,0 +1,448 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: smoke-test-image-registry
+spec: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    openshift.io/description: Service account for smoke-test jobs
+  name: smoke-test-image-registry-job
+  namespace: smoke-test-image-registry
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    openshift.io/description: For ConfigMap creation and `oc debug` capability in
+      smoke test jobs
+  name: smoke-test-job-cm-editor
+  namespace: smoke-test-image-registry
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - create
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - pods/log
+  verbs:
+  - get
+  - list
+  - create
+  - delete
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    openshift.io/description: Allows smoke test job to edit ConfigMaps in this namespace.
+  name: smoke-test-job-cm-editors
+  namespace: smoke-test-image-registry
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: smoke-test-job-cm-editor
+subjects:
+- kind: ServiceAccount
+  name: smoke-test-image-registry-job
+  namespace: smoke-test-image-registry
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    openshift.io/description: Allows smoke test job to push images to this namespace.
+  name: smoke-test-job-image-builders
+  namespace: smoke-test-image-registry
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:image-builder
+subjects:
+- kind: ServiceAccount
+  name: smoke-test-image-registry-job
+  namespace: smoke-test-image-registry
+---
+apiVersion: v1
+data:
+  push_image.py: "#!/usr/bin/env python3\n\nimport os\nimport sys\nimport json\nimport
+    re\nimport subprocess\nimport tempfile\nimport base64\nimport hashlib\nimport
+    argparse\nimport logging\n\ndef parse_args():\n    parser = argparse.ArgumentParser(description=\"Push
+    an OCI image tarball to an OpenShift image registry.\")\n    parser.add_argument(\"registry\",
+    nargs=\"?\", help=\"Registry hostname\")\n    parser.add_argument(\"repository\",
+    nargs=\"?\", help=\"Repository (project/image)\")\n    parser.add_argument(\"tarball\",
+    nargs=\"?\", help=\"Path to OCI tarball\")\n    parser.add_argument(\"--verbose\",
+    action=\"store_true\", help=\"Enable verbose logging (redacted)\")\n    parser.add_argument(\"--debug\",
+    action=\"store_true\", help=\"Enable debug logging (unredacted)\")\n    parser.add_argument(\"--dry-run\",
+    action=\"store_true\", help=\"Simulate actions without uploading\")\n    return
+    parser.parse_args()\n\ndef redact(text):\n    return re.sub(r'(?i)(Bearer\\s+)[a-zA-Z0-9._-]+',
+    r'\\1<REDACTED>', text)\n\ndef log(msg, config):\n    if config.get(\"debug\"):\n
+    \       logging.debug(msg)\n    elif config.get(\"verbose\"):\n        logging.info(redact(msg))\n\ndef
+    setup_logging(debug):\n    level = logging.DEBUG if debug else logging.INFO\n
+    \   logging.basicConfig(format='%(levelname)s: %(message)s', level=level)\n\ndef
+    get_config():\n    args = parse_args()\n    registry = args.registry or os.environ.get(\"REGISTRY\")\n
+    \   repository = args.repository or (\n        f\"{os.environ.get('PROJECT')}/{os.environ.get('IMAGE_NAME')}\"\n
+    \       if os.environ.get(\"PROJECT\") and os.environ.get(\"IMAGE_NAME\")\n        else
+    None\n    )\n    tarball = args.tarball or os.environ.get(\"TARBALL\")\n\n    if
+    not all([registry, repository, tarball]):\n        print(\"Missing config: registry,
+    repository, and tarball required.\")\n        sys.exit(1)\n\n    verbose = args.verbose
+    or os.environ.get(\"VERBOSITY\", \"0\") == \"1\"\n    debug = args.debug or os.environ.get(\"DEBUG\",
+    \"0\") == \"1\"\n\n    return {\n        \"registry\": registry,\n        \"repository\":
+    repository,\n        \"tarball\": tarball,\n        \"tag\": os.environ.get(\"TAG\",
+    \"latest\"),\n        \"ca_cert\": os.environ.get(\"CA_CERT\", \"/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt\"),\n
+    \       \"token_path\": os.environ.get(\"TOKEN_PATH\", \"/var/run/secrets/kubernetes.io/serviceaccount/token\"),\n
+    \       \"verbose\": verbose,\n        \"debug\": debug,\n        \"dry_run\":
+    args.dry_run,\n    }\n\ndef sha256_digest(path):\n    h = hashlib.sha256()\n    with
+    open(path, \"rb\") as f:\n        while chunk := f.read(8192):\n            h.update(chunk)\n
+    \   return f\"sha256:{h.hexdigest()}\"\n\ndef run_curl(method, url, data=None,
+    headers=None, extra_args=None, input_file=None, ca_cert=None, token_path=None,
+    config=None):\n    token = open(token_path).read().strip()\n    cmd = [\"curl\",
+    \"-sfL\", \"-X\", method]\n    if config.get(\"debug\"):\n        cmd.insert(1,
+    \"-v\")\n\n    cmd += [\n        \"--cacert\", ca_cert,\n        \"-H\", f\"Authorization:
+    Bearer {token}\",\n        *[item for h in (headers or []) for item in (\"-H\",
+    h)],\n    ]\n\n    if data:\n        cmd += [\"--data-binary\", \"@-\"]\n    if
+    input_file:\n        cmd += [\"--upload-file\", input_file]\n    if extra_args:\n
+    \       cmd += extra_args\n\n    cmd.append(url)\n\n    log(\"Running curl: \"
+    + ' '.join(cmd), config)\n\n    result = subprocess.run(\n        cmd,\n        input=data,\n
+    \       stdout=subprocess.PIPE,\n        stderr=subprocess.PIPE,\n    )\n\n    log(\"stdout:\\n\"
+    + result.stdout.decode(), config)\n    log(\"stderr:\\n\" + result.stderr.decode(),
+    config)\n\n    if result.returncode != 0:\n        raise RuntimeError(f\"Curl
+    failed: returncode={result.returncode}\")\n    return result\n\ndef upload_blob(repo,
+    blob_path, digest, config):\n    log(f\"Uploading blob {digest} ...\", config)\n
+    \   start = run_curl(\n        method=\"POST\",\n        url=f\"https://{config['registry']}/v2/{repo}/blobs/uploads/\",\n
+    \       ca_cert=config[\"ca_cert\"],\n        token_path=config[\"token_path\"],\n
+    \       config=config\n    )\n\n    location = None\n    for line in start.stderr.decode().splitlines():\n
+    \       match = re.search(r'^< location:\\s*(.+)$', line, re.IGNORECASE)\n        if
+    match:\n            location = match.group(1).strip()\n            break\n\n    if
+    not location:\n        raise RuntimeError(\"Failed to extract Location header
+    from response\")\n\n    put_url = f\"{location}&digest={digest}\" if \"?\" in
+    location else f\"{location}?digest={digest}\"\n    run_curl(\"PUT\", put_url,
+    input_file=blob_path, ca_cert=config[\"ca_cert\"], token_path=config[\"token_path\"],
+    config=config)\n\ndef upload_manifest(repo, manifest, tag, config):\n    manifest_json
+    = json.dumps(manifest).encode()\n    result = run_curl(\n        \"PUT\",\n        f\"https://{config['registry']}/v2/{repo}/manifests/{tag}\",\n
+    \       data=manifest_json,\n        headers=[\"Content-Type: application/vnd.oci.image.manifest.v1+json\"],\n
+    \       ca_cert=config[\"ca_cert\"],\n        token_path=config[\"token_path\"],\n
+    \       config=config\n    )\n\n    digest = None\n    for line in result.stderr.decode().splitlines():\n
+    \       match = re.search(r'^< docker-content-digest:\\s*([a-z0-9]+:[a-f0-9]+)$',
+    line, re.IGNORECASE)\n        if match:\n            digest = match.group(1).strip()\n
+    \           break\n\n    if not digest:\n        raise RuntimeError(\"Failed to
+    extract Docker-Content-Digest from registry response\")\n\n    return digest\n\ndef
+    create_configmap_with_digest(digest, config):\n    \"\"\"Create a ConfigMap with
+    the image digest\"\"\"\n    configmap_name = \"smoke-test-image-digest\"\n\n    try:\n
+    \       with open(\"/var/run/secrets/kubernetes.io/serviceaccount/namespace\",
+    \"r\") as f:\n            namespace = f.read().strip()\n    except FileNotFoundError:\n
+    \       print(\"Namespace file not found.\")\n        sys.exit(1)\n\n    cmd =
+    [\n        \"oc\", \"create\", \"configmap\", configmap_name,\n        \"--from-literal=digest=\"
+    + digest,\n        \"-n\", namespace\n    ]\n    \n    log(f\"Creating ConfigMap
+    {configmap_name} in namespace {namespace} with digest.\", config)\n    \n    result
+    = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n\n    if
+    result.returncode != 0:\n        raise RuntimeError(f\"Failed to create ConfigMap:
+    {result.stderr.decode()}\")\n    log(f\"ConfigMap {configmap_name} created successfully
+    in namespace {namespace}.\", config)\n\ndef main():\n    config = get_config()\n
+    \   setup_logging(config[\"debug\"])\n    repo = config[\"repository\"]\n\n    with
+    tempfile.TemporaryDirectory() as tmpdir:\n        subprocess.run([\"tar\", \"-xf\",
+    config[\"tarball\"], \"-C\", tmpdir], check=True)\n\n        with open(os.path.join(tmpdir,
+    \"index.json\")) as f:\n            index = json.load(f)\n\n        algo, hash_value
+    = index[\"manifests\"][0][\"digest\"].split(\":\")\n        manifest_path = os.path.join(tmpdir,
+    \"blobs\", algo, hash_value)\n        with open(manifest_path) as f:\n            manifest
+    = json.load(f)\n\n        blobs = [manifest[\"config\"]] + manifest[\"layers\"]\n
+    \       for blob in blobs:\n            algo, hash_value = blob[\"digest\"].split(\":\")\n
+    \           blob_path = os.path.join(tmpdir, \"blobs\", algo, hash_value)\n            actual_digest
+    = sha256_digest(blob_path)\n            assert actual_digest == blob[\"digest\"],
+    f\"Digest mismatch for {blob_path}\"\n            upload_blob(repo, blob_path,
+    blob[\"digest\"], config)\n\n        # Upload manifest and capture digest from
+    registry response\n        manifest_digest = upload_manifest(repo, manifest, config[\"tag\"],
+    config)\n        print(\"Upload complete.\")\n\n        # Create ConfigMap with
+    the digest value for verification job\n        create_configmap_with_digest(manifest_digest,
+    config)\n\nif __name__ == \"__main__\":\n    main()\n"
+kind: ConfigMap
+metadata:
+  name: push-image-script-t92t84k248
+  namespace: smoke-test-image-registry
+---
+apiVersion: v1
+binaryData:
+  test-image-oci.tar: |
+    YmxvYnMvAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAwMDA3
+    NTUAMDAwMDAwMAAwMDAwMDAwADAwMDAwMDAwMDAwADE1MDEwMjU2MDE3ADAxMjE1MgAgNQ
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3Rhcg
+    AwMHJvb3QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcm9vdAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAwMDAwMDAwADAwMDAwMDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABibG9icy9zaGEyNTYv
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDAwMDc1NQAwMDAwMDAwADAw
+    MDAwMDAAMDAwMDAwMDAwMDAAMTUwMTAyNTYwMTcAMDEzMTYyACA1AAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHVzdGFyADAwcm9vdAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAByb290AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    ADAwMDAwMDAAMDAwMDAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGJsb2JzL3NoYTI1Ni8xMmI2ZjY4MWRkMjI4
+    NzZhYjhkM2EwZGM1OTRjZWEyODk1YTk5MDM3N2Y3OTVmZTNjYmJhYWQzODgxMzIzZTQyAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwNjQ0ADAwMDAwMDAAMDAwMDAwMAAwMDAwMDAw
+    MDc2NAAxNTAxMDI1NjAxNwAwMjQwMTIAIDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAdXN0YXIAMDByb290AAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAHJvb3QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDAwMDAwMAAwMDAw
+    MDAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAeyJzY2hlbWFWZXJzaW9uIjoyLCJtZWRpYVR5cGUiOiJhcHBsaWNh
+    dGlvbi92bmQub2NpLmltYWdlLm1hbmlmZXN0LnYxK2pzb24iLCJjb25maWciOnsibWVkaW
+    FUeXBlIjoiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5jb25maWcudjEranNvbiIsImRp
+    Z2VzdCI6InNoYTI1NjplZTJkYjNjNDY0YmMyNGE2ODEyMjg3OTA5ODAzY2JlMGQ0MjQ0OG
+    E4ZmVmNDc2YzQ0MjVjODQzNGRmNDQ5MzBlIiwic2l6ZSI6ODEwfSwibGF5ZXJzIjpbeyJt
+    ZWRpYVR5cGUiOiJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmxheWVyLnYxLnRhcitnem
+    lwIiwiZGlnZXN0Ijoic2hhMjU2Ojc1Y2E3NTcwODcwMzY1MDVkMTA2ZjBlNjJlNWZhZDky
+    NmE0NTFlMGJjZWM3MWZmZmQwOThhMDkzYTUxMjU3NmUiLCJzaXplIjozNjQwfV0sImFubm
+    90YXRpb25zIjp7Im9yZy5vcGVuY29udGFpbmVycy5pbWFnZS5iYXNlLmRpZ2VzdCI6IiIs
+    Im9yZy5vcGVuY29udGFpbmVycy5pbWFnZS5iYXNlLm5hbWUiOiIifX0AAAAAAAAAAAAAAA
+    BibG9icy9zaGEyNTYvNzVjYTc1NzA4NzAzNjUwNWQxMDZmMGU2MmU1ZmFkOTI2YTQ1MWUw
+    YmNlYzcxZmZmZDA5OGEwOTNhNTEyNTc2ZQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDAwMD
+    Y0NAAwMDAwMDAwADAwMDAwMDAAMDAwMDAwMDcwNzAAMTUwMTAyNTYwMTcAMDIzNjMyACAw
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHVzdGFy
+    ADAwcm9vdAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAByb290AAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAADAwMDAwMDAAMDAwMDAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    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
+    44ZNGyDY0rxurbIWgg3rH21sWbuxIWXz6NqWlrVbUzbpZ7ILtjQ0BVuaIfhEs5LSQPDx1l
+    YI1jdv3NiwSbla/D8VdDRHZ73OdYOM+w2T7zWkMfWk5/Yp/Kv3HCbfb4Ap9xzSCGfczci8
+    /5G+oJCb1l8nLpZM4fsdvt/h3+XcI0kjfW0kjbIpfPqRCuH++Z8v/3KHvzituXIfxRmejn
+    pqXKflNx2d01yQ7/DzHf69jv567V8LADdmtNOV+xvF17b3TpFr6ew2g687fP1z8jc65U/3
+    04DDH3D4Tjd8hp/Gd6fwhx3+sMMvcPTXy799Ch/S85hzIceXbmgHTrNeQdzxmS6/X0zxfc
+    59p/3T/2/+95z8neyuIM2/zUmn4bqGTOediSKH/09XVZN4WWSRRRZfFP8LAAD//wMAgn7n
+    ZQA8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABibG9icy9zaGEyNT
+    YvZWUyZGIzYzQ2NGJjMjRhNjgxMjI4NzkwOTgwM2NiZTBkNDI0NDhhOGZlZjQ3NmM0NDI1
+    Yzg0MzRkZjQ0OTMwZQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDAwMDY0NAAwMDAwMDAwAD
+    AwMDAwMDAAMDAwMDAwMDE0NTIAMTUwMTAyNTYwMTcAMDIzNTYxACAwAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHVzdGFyADAwcm9vdAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAByb290AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAADAwMDAwMDAAMDAwMDAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHsiY3JlYXRlZCI6IjIwMjUtMDUtMTJUMD
+    I6MjU6MTMuNzcwNTk1MTM3WiIsImFyY2hpdGVjdHVyZSI6ImFtZDY0Iiwib3MiOiJsaW51
+    eCIsImNvbmZpZyI6eyJVc2VyIjoiMTAwMCIsIkVudiI6WyJQQVRIPS91c3IvbG9jYWwvc2
+    JpbjovdXNyL2xvY2FsL2JpbjovdXNyL3NiaW46L3Vzci9iaW46L3NiaW46L2JpbiJdLCJD
+    bWQiOlsiL2hlbGxvIl0sIkxhYmVscyI6eyJpby5idWlsZGFoLnZlcnNpb24iOiIxLjMzLj
+    cifX0sInJvb3RmcyI6eyJ0eXBlIjoibGF5ZXJzIiwiZGlmZl9pZHMiOlsic2hhMjU2OjRl
+    ZDUzNjk1M2UyNzEzZWUyYzdiMmExNDVmZjMwOWVkYTc4NTZmMDdhYjhmY2VkN2E2NGE2ZD
+    kwOGY2MWE5NTAiXX0sImhpc3RvcnkiOlt7ImNyZWF0ZWQiOiIyMDI1LTA1LTEyVDAyOjE1
+    OjM3LjMyNzU4MjI5OVoiLCJjcmVhdGVkX2J5IjoiL2Jpbi9zaCAtYyAjKG5vcCkgQ09QWS
+    BmaWxlOjFmZTVmNDY4MjI4MTVmMTMwM2FlYzY4MmEyMmU2OTU5Yzg2MDZmYjgwOTljMWM4
+    OGUyZjBmZjgyNGFjOWEwZjEgaW4gL2hlbGxvICJ9LHsiY3JlYXRlZCI6IjIwMjUtMDUtMT
+    JUMDI6MjU6MTMuNzIzNjc0ODg0WiIsImNyZWF0ZWRfYnkiOiIvYmluL3NoIC1jICMobm9w
+    KSBVU0VSIDEwMDAiLCJjb21tZW50IjoiRlJPTSBmY2QzZDQzNmY1ZjgiLCJlbXB0eV9sYX
+    llciI6dHJ1ZX0seyJjcmVhdGVkIjoiMjAyNS0wNS0xMlQwMjoyNToxMy43NzExMTMyMzVa
+    IiwiY3JlYXRlZF9ieSI6Ii9iaW4vc2ggLWMgIyhub3ApIENNRCBbXCIvaGVsbG9cIl0iLC
+    Jjb21tZW50IjoiRlJPTSBmMzcxZTQ4YjE4ZjAiLCJlbXB0eV9sYXllciI6dHJ1ZX1dfQAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AABpbmRleC5qc29uAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDAw
+    MDY0NAAwMDAwMDAwADAwMDAwMDAAMDAwMDAwMDA0MDcAMTUwMTAyNTYwMTcAMDEzMDU0AC
+    AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHVzdG
+    FyADAwcm9vdAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAByb290AAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAADAwMDAwMDAAMDAwMDAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHsic2NoZW1hVmVy
+    c2lvbiI6MiwibWFuaWZlc3RzIjpbeyJtZWRpYVR5cGUiOiJhcHBsaWNhdGlvbi92bmQub2
+    NpLmltYWdlLm1hbmlmZXN0LnYxK2pzb24iLCJkaWdlc3QiOiJzaGEyNTY6MTJiNmY2ODFk
+    ZDIyODc2YWI4ZDNhMGRjNTk0Y2VhMjg5NWE5OTAzNzdmNzk1ZmUzY2JiYWFkMzg4MTMyM2
+    U0MiIsInNpemUiOjUwMCwiYW5ub3RhdGlvbnMiOnsib3JnLm9wZW5jb250YWluZXJzLmlt
+    YWdlLnJlZi5uYW1lIjoibG9jYWxob3N0L2hlbGxvOmxhdGVzdCJ9fV19AAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAb2NpLWxheW91dAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAwMDA2NDQAMDAwMDAwMAAwMDAwMDAwADAwMDAw
+    MDAwMDM2ADE1MDEwMjU2MDE3ADAxMzA2MAAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMHJvb3QAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAcm9vdAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwADAw
+    MDAwMDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAB7ImltYWdlTGF5b3V0VmVyc2lvbiI6IjEuMC4wIn0AAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+kind: ConfigMap
+metadata:
+  name: test-image-oci-b4mk5cdchm
+  namespace: smoke-test-image-registry
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    openshift.io/description: Pushes an OCI image tarball to the OpenShift image registry
+      using a Python script.
+  name: push-image
+  namespace: smoke-test-image-registry
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      containers:
+      - command:
+        - /usr/bin/python3
+        - /app/push_image.py
+        env:
+        - name: REGISTRY
+          value: image-registry.openshift-image-registry.svc:5000
+        - name: PROJECT
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: IMAGE_NAME
+          value: test-image
+        - name: TAG
+          value: test
+        - name: TARBALL
+          value: /oci/test-image-oci.tar
+        image: image-registry.openshift-image-registry.svc:5000/openshift/cli
+        name: push
+        volumeMounts:
+        - mountPath: /oci
+          name: image
+        - mountPath: /app
+          name: script
+          readOnly: true
+      restartPolicy: Never
+      serviceAccountName: smoke-test-image-registry-job
+      volumes:
+      - configMap:
+          items:
+          - key: test-image-oci.tar
+            path: test-image-oci.tar
+          name: test-image-oci-b4mk5cdchm
+        name: image
+      - configMap:
+          defaultMode: 493
+          items:
+          - key: push_image.py
+            path: push_image.py
+          name: push-image-script-t92t84k248
+        name: script

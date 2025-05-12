@@ -1,0 +1,10 @@
+---
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+namespace: smoke-test-image-registry
+resources:
+- resources/namespace.yaml
+- resources/role.smoke-test-job-cm-editor.yaml
+- resources/role-binding.smoke-test-job-cm-editors.yaml
+- resources/role-binding.smoke-test-job-image-builders.yaml
+- resources/service-account.smoke-test-image-registry-job.yaml

@@ -1,0 +1,14 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    openshift.io/description: "For ConfigMap creation and `oc debug` capability in smoke test jobs"
+  name: smoke-test-job-cm-editor
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "list"]
+  - apiGroups: [""]
+    resources: ["pods","pods/log"]
+    verbs: ["get", "list", "create", "delete", "watch"]

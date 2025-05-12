@@ -1,0 +1,55 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    openshift.io/description: Pushes an OCI image tarball to the OpenShift image registry using a Python script.
+  name: push-image
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      containers:
+      - name: push
+        image: image-registry.openshift-image-registry.svc:5000/openshift/cli
+        command:
+        - /usr/bin/python3
+        - /app/push_image.py
+        env:
+        - name: REGISTRY
+          value: "image-registry.openshift-image-registry.svc:5000"
+        - name: PROJECT
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: IMAGE_NAME
+          value: "test-image"
+        - name: TAG
+          value: "test"
+        - name: TARBALL
+          value: "/oci/test-image-oci.tar"
+        #- name: DEBUG
+        #  value: "1"
+        volumeMounts:
+        - name: image
+          mountPath: /oci
+        - name: script
+          mountPath: /app
+          readOnly: true
+      volumes:
+      - name: image
+        configMap:
+          name: test-image-oci
+          items:
+          - key: test-image-oci.tar
+            path: test-image-oci.tar
+      - name: script
+        configMap:
+          name: push-image-script
+          defaultMode: 0755
+          items:
+          - key: push_image.py
+            path: push_image.py
+      serviceAccountName: smoke-test-image-registry-job
+      restartPolicy: Never
+
