@@ -91,7 +91,6 @@ wf-classic-cluster-conftest: ## Openshift conformance test workflow (Classic ARO
 ###############################################################################
 ## Ansible
 ##
-REGISTRY ?= registry.access.redhat.com
 TAG ?= $(shell git describe --exact-match 2>/dev/null)
 COMMIT = $(shell git rev-parse --short=7 HEAD)$(shell [[ $$(git status --porcelain) = "" ]] || echo -dirty)
 ifeq ($(TAG),)
@@ -103,37 +102,40 @@ endif
 NO_CACHE ?= true
 PODMAN_REMOTE_ARGS ?=
 PODMAN_VOLUME_OVERLAY=$(shell if [[ $$(getenforce) == "Enforcing" ]]; then echo ":O"; else echo ""; fi 2>/dev/null)
+RESOLVER_IMAGE ?= docker.io/alpine:latest
 
 .PHONY: ansible-image
-ansible-image:
-	python3 ./utils/build-ansible-image.py Dockerfile.ansible \
-		--build-arg REGISTRY=$(REGISTRY) \
-		--build-arg VERSION=$(VERSION) \
-		--tag aro-ansible:$(VERSION) \
-		--tag aro-ansible:latest
-.PHONY: ansible-image-latest
-# ansible-image-latest:
-# 	python3 ./utils/build-ansible-image.py Dockerfile.ansible --latest \
-# 		--build-arg REGISTRY=$(REGISTRY) \
-# 		--build-arg VERSION=$(VERSION) \
-# 		--tag aro-ansible:$(VERSION) \
-# 		--tag aro-ansible:latest
-ansible-image-latest:
-# Package specifications without any versions will install the latest version
-# See also Dockerfile.ansible.constraits to block problematic versions
+ansible-image: ## Build aro-ansible image with pinned versions from Dockerfile.ansible
 	podman $(PODMAN_REMOTE_ARGS) \
 		build . \
 		-f Dockerfile.ansible \
-		--build-arg REGISTRY=$(REGISTRY) \
-		--build-arg VERSION=$(VERSION) \
-		--build-arg ANSIBLE_AZCOLLECTION_SPEC=azure.azcollection \
-		--build-arg ANSIBLE_SPEC=ansible \
-		--build-arg ANSIBLE_LINT_SPEC=ansible-lint \
-		--build-arg AZURE_CLI_SPEC=azure-cli \
-		--build-arg PIPX_SPEC=pipx \
 		--no-cache=$(NO_CACHE) \
 		--tag aro-ansible:$(VERSION) \
 		--tag aro-ansible:latest
+
+.PHONY: ansible-image-latest
+ansible-image-latest: ## Build aro-ansible image with latest non-forbidden package versions
+	podman $(PODMAN_REMOTE_ARGS) \
+		build . \
+		-f Dockerfile.ansible \
+		$$(podman run --rm \
+			-v $(CURDIR)/resolve-versions.sh:/tmp/resolve-versions.sh:ro \
+			-v $(CURDIR)/Dockerfile.ansible.forbidden_versions:/tmp/forbidden_versions:ro \
+			$(RESOLVER_IMAGE) \
+			sh -c 'apk add -q --no-cache bash curl jq >/dev/null 2>&1 && bash /tmp/resolve-versions.sh /tmp/forbidden_versions --build-args') \
+		--no-cache=$(NO_CACHE) \
+		--tag aro-ansible:$(VERSION) \
+		--tag aro-ansible:latest
+
+.PHONY: update-versions
+update-versions: ## Update pinned versions in Dockerfile.ansible and requirements (in container)
+	podman run --rm \
+		-v $(CURDIR)/resolve-versions.sh:/tmp/resolve-versions.sh:ro \
+		-v $(CURDIR)/Dockerfile.ansible.forbidden_versions:/tmp/forbidden_versions:ro \
+		-v $(CURDIR)/Dockerfile.ansible:/work/Dockerfile.ansible \
+		-v $(CURDIR)/ansible/ansible-requirements.txt:/work/ansible-requirements.txt \
+		$(RESOLVER_IMAGE) \
+		sh -c 'apk add -q --no-cache bash curl jq >/dev/null 2>&1 && bash /tmp/resolve-versions.sh /tmp/forbidden_versions --update /work/Dockerfile.ansible /work/ansible-requirements.txt'
 
 LOCATION ?= eastus
 CLUSTERPREFIX ?= $(USER)
