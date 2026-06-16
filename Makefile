@@ -16,7 +16,7 @@ default: help config-check ;
 
 ## Credit to https://gist.github.com/prwhite/8168133
 help: ## Show this help.
-	@grep -E '^[a-z.A-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'m
+	@grep -E '^[a-z.A-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build aro-e2e image
 	./aro-e2e/common.sh build
@@ -216,8 +216,7 @@ cluster-cleanup:
 				-e CLUSTERPREFIX=$(CLUSTERPREFIX) \
 				-e CLEANUP=True \
 				-e SSH_KEY_BASENAME=$(SSH_KEY_BASENAME) \
-				-e CLEANUP=True \
-				cleanup.playbook.yaml \
+				cleanup.playbook.yaml
 
 .PHONY: lint-ansible
 lint-ansible:
@@ -246,7 +245,7 @@ test-ansible:
 		-v ./ansible:/ansible$(PODMAN_VOLUME_OVERLAY) \
 		-v $(SSH_CONFIG_DIR):/root/.ssh$(PODMAN_VOLUME_OVERLAY) \
 		--entrypoint ansible-test \
-		--workdir /opt/app-root/src/.local/share/pipx/venvs/ansible/lib/$(PYTHON_VERSION)/site-packages/ansible_collections/azureredhatopenshift/cluster$(PODMAN_VOLUME_OVERLAY) \
+		--workdir /opt/app-root/src/.local/share/pipx/venvs/ansible/lib/$(PYTHON_VERSION)/site-packages/ansible_collections/azureredhatopenshift/cluster \
 		aro-ansible:$(VERSION) \
 			sanity \
 			-v
