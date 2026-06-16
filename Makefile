@@ -6,7 +6,7 @@ default: help config-check ;
 ################################################################################
 ## Configuration Setup
 ##
-## This Makefile uses a configuration file for it's variables.
+## This Makefile uses a configuration file for its variables.
 ## To set up the environment create a copy of `config_example.sh` with your user.
 ## run `make config-create` or `cp config_example.sh config_$USER.sh`
 
